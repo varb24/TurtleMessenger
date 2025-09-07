@@ -19,6 +19,60 @@
 *.tar.gz
 *.rar
 
+
 # virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
 hs_err_pid*
 replay_pid*
+
+# --- common build / IDE artifacts ---
+# Gradle / build
+.gradle/
+build/
+
+# IntelliJ / IDEA
+.idea/
+*.iml
+
+# VSCode
+.vscode/
+
+# Node / frontend
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+
+# NPM
+package-lock.json
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Databases / runtime
+*.db
+database.db
+
+# Logs
+*.log
+
+# Compiled Java
+*.class
+
+# JARs / bundles
+*.jar
+*.war
+
+# Environment files
+.env
+
+# Misc
+out/
+
+# Local gradle wrapper caches
+.gradle/
+
+# Coverage
+coverage/
+
+# Keep generated resources
+!frontend/src/

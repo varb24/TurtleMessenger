@@ -7,7 +7,7 @@ import org.springframework.web.socket.config.annotation.StompEndpointRegistry;
 import org.springframework.web.socket.config.annotation.WebSocketMessageBrokerConfigurer;
 import org.springframework.messaging.simp.config.ChannelRegistration;
 import io.turtlemessenger.security.JwtUtil;
-import org.springframework.context.annotation.Bean;
+import org.springframework.beans.factory.annotation.Qualifier;
 
 @Configuration
 @EnableWebSocketMessageBroker
@@ -17,11 +17,11 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
     public void registerStompEndpoints(StompEndpointRegistry registry) {
         // Native WebSocket endpoint
         registry.addEndpoint("/ws")
-                .setAllowedOriginPatterns("*");
+                .setAllowedOriginPatterns("http://localhost:5173", "http://localhost:5174", "http://127.0.0.1:5173", "http://127.0.0.1:5174");
 
         // SockJS fallback endpoint
         registry.addEndpoint("/ws")
-                .setAllowedOriginPatterns("*")
+                .setAllowedOriginPatterns("http://localhost:5173", "http://localhost:5174", "http://127.0.0.1:5173", "http://127.0.0.1:5174")
                 .withSockJS();
     }
 
@@ -32,7 +32,7 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
     }
 
     private final JwtUtil jwtUtil;
-    public WebSocketConfig(JwtUtil jwtUtil) {
+    public WebSocketConfig(@Qualifier("accessJwt") JwtUtil jwtUtil) {
         this.jwtUtil = jwtUtil;
     }
 

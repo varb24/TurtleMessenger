@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { Client, IMessage } from '@stomp/stompjs'
 import axios from 'axios'
 
@@ -9,7 +9,14 @@ type Message = {
   ts: number
 }
 
+
 const ROOM_ID = 1
+
+type Contact = {
+  id: number
+  username: string
+  status: 'PENDING' | 'ACCEPTED' | 'BLOCKED'
+}
 
 export default function App() {
   const [messages, setMessages] = useState<Message[]>([])
@@ -20,24 +27,96 @@ export default function App() {
   const [password, setPassword] = useState<string>('')
   const [mode, setMode] = useState<'login' | 'register'>('login')
   const [error, setError] = useState<string | null>(null)
-  const [token, setToken] = useState<string>(() => localStorage.getItem('tm.token') || '')
+  const [accessToken, setAccessToken] = useState<string>(() => localStorage.getItem('tm.access') || '')
+  const [refreshToken, setRefreshToken] = useState<string>(() => localStorage.getItem('tm.refresh') || '')
 
+  // Contacts state
+  const [contacts, setContacts] = useState<Contact[]>([])
+  const [requests, setRequests] = useState<Contact[]>([])
+  const [newContact, setNewContact] = useState('')
+  const [contactsError, setContactsError] = useState<string | null>(null)
+
+  // Attach Authorization header for REST
   useEffect(() => {
-    if (token) {
-      axios.defaults.headers.common['Authorization'] = `Bearer ${token}`
+    if (accessToken) {
+      axios.defaults.headers.common['Authorization'] = `Bearer ${accessToken}`
     } else {
       delete axios.defaults.headers.common['Authorization']
     }
-  }, [token])
+  }, [accessToken])
+
+  // Axios 401 -> try refresh
+  useEffect(() => {
+    const id = axios.interceptors.response.use(
+      undefined,
+      async (err) => {
+        const status = err?.response?.status
+        const original = err?.config || {}
+        const url: string | undefined = original?.url
+        // avoid infinite loop on auth endpoints
+        const isAuthCall = !!url && url.includes('/api/auth/')
+        // Some servers may return 403 (not 401) for missing/expired access tokens
+        if ((status === 401 || status === 403) && !isAuthCall && refreshToken) {
+          try {
+            // Explicitly send the refresh token in the Authorization header to avoid using a stale access token header
+            const res = await axios.post(
+              '/api/auth/refresh',
+              { refreshToken },
+              { headers: { Authorization: `Bearer ${refreshToken}` } }
+            )
+            const newAccess = res.data.accessToken as string
+            if (!newAccess) throw new Error('no access token returned')
+            setAccessToken(newAccess)
+            localStorage.setItem('tm.access', newAccess)
+            // retry original request with the new access token
+            ;(original as any).headers = { ...((original as any).headers || {}), Authorization: `Bearer ${newAccess}` }
+            return axios.request(original)
+          } catch (e) {
+            // refresh failed -> logout
+            setAccessToken('')
+            setRefreshToken('')
+            localStorage.removeItem('tm.access')
+            localStorage.removeItem('tm.refresh')
+            localStorage.removeItem('tm.username')
+          }
+        }
+        return Promise.reject(err)
+      }
+    )
+    return () => axios.interceptors.response.eject(id)
+  }, [refreshToken])
+
+  // Fetch contacts after login and on changes triggered by actions
+  const refreshContacts = async () => {
+    if (!accessToken) return
+    try {
+      const [c, r] = await Promise.all([
+        axios.get('/api/contacts'),
+        axios.get('/api/contacts/requests')
+      ])
+      setContacts(c.data as Contact[])
+      setRequests(r.data as Contact[])
+      setContactsError(null)
+    } catch (e: any) {
+      const msg = e?.response?.data?.error || 'Failed to load contacts'
+      setContactsError(msg)
+    }
+  }
 
   useEffect(() => {
-    if (!token) return
+    refreshContacts()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accessToken])
+
+  // STOMP connection
+  useEffect(() => {
+    if (!accessToken) return
     const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.hostname}:8080/ws`
     const c = new Client({
       brokerURL: url,
       reconnectDelay: 2000,
       debug: (str) => console.log(str),
-      connectHeaders: { Authorization: `Bearer ${token}` }
+      connectHeaders: { Authorization: `Bearer ${accessToken}` }
     })
     c.onConnect = () => {
       setConnected(true)
@@ -66,7 +145,7 @@ export default function App() {
     c.activate()
     setClient(c)
     return () => { c.deactivate() }
-  }, [token])
+  }, [accessToken])
 
   const send = () => {
     if (!client || !connected) return
@@ -79,22 +158,71 @@ export default function App() {
 
   const doLogin = async (e: React.FormEvent) => {
     e.preventDefault()
-    const name = username.trim()
+    const name = username.trim().toLowerCase()
     try {
       setError(null)
       if (!name || !password) { setError('Enter username and password'); return }
+      // Basic client-side validation to match server rules
+      if (!/^[a-z0-9._-]{3,50}$/.test(name)) {
+        setError('Username must be 3-50 chars: a-z, 0-9, . _ -');
+        return
+      }
       const path = mode === 'register' ? '/api/auth/register' : '/api/auth/login'
       const res = await axios.post(path, { username: name, password })
-      const t = res.data.token as string
-      setToken(t)
-      localStorage.setItem('tm.token', t)
+      const access = res.data.accessToken as string
+      const refresh = res.data.refreshToken as string
+      setAccessToken(access)
+      setRefreshToken(refresh)
+      localStorage.setItem('tm.access', access)
+      localStorage.setItem('tm.refresh', refresh)
       localStorage.setItem('tm.username', name)
     } catch (err: any) {
-      setError(err?.response?.data?.error || 'Authentication failed')
+      const msg = err?.response?.data?.error || err?.response?.data?.message || 'Authentication failed'
+      setError(msg)
     }
   }
 
-  if (!token) {
+  const logout = () => {
+    setAccessToken('')
+    setRefreshToken('')
+    localStorage.removeItem('tm.access')
+    localStorage.removeItem('tm.refresh')
+    localStorage.removeItem('tm.username')
+  }
+
+  const addContact = async () => {
+    const u = newContact.trim()
+    if (!u) return
+    try {
+      setContactsError(null)
+      await axios.post('/api/contacts', { user: u })
+      setNewContact('')
+      await refreshContacts()
+    } catch (e: any) {
+      const msg = e?.response?.data?.error || 'Failed to add contact'
+      setContactsError(msg)
+    }
+  }
+
+  const acceptRequest = async (u: string) => {
+    try {
+      await axios.post('/api/contacts/accept', { user: u })
+      await refreshContacts()
+    } catch (e) {
+      // ignore; UI will refetch
+    }
+  }
+
+  const removeContact = async (u: string) => {
+    try {
+      await axios.delete('/api/contacts', { params: { user: u } })
+      await refreshContacts()
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  if (!accessToken) {
     return (
       <div style={{ maxWidth: 480, margin: '4rem auto', fontFamily: 'system-ui' }}>
         <h1>TurtleMessenger</h1>
@@ -120,38 +248,89 @@ export default function App() {
             {mode === 'login' ? 'Create an account' : 'I already have an account'}
           </button>
         </div>
-        <p style={{ color: '#666' }}>Account uses a JWT. Passwords are hashed on the server.</p>
+        <p style={{ color: '#666' }}>Account uses access + refresh tokens. Passwords are hashed on the server.</p>
       </div>
     )
   }
 
   return (
-    <div style={{ maxWidth: 720, margin: '2rem auto', fontFamily: 'system-ui' }}>
+    <div style={{ maxWidth: 1000, margin: '2rem auto', fontFamily: 'system-ui' }}>
       <h1>TurtleMessenger</h1>
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
         <div>User: <b>{username}</b></div>
-        <button onClick={() => { setToken(''); localStorage.removeItem('tm.token'); }}>Logout</button>
+        <button onClick={logout}>Logout</button>
       </div>
-      <div style={{ border: '1px solid #ddd', padding: 16, height: 360, overflow: 'auto' }}>
-        {messages.map((m, i) => (
-          <div key={i}>
-            <b>{m.senderId}:</b> {m.content} <small style={{ color: '#888' }}>{new Date(m.ts).toLocaleTimeString()}</small>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '260px 1fr', gap: 16 }}>
+        {/* Sidebar: Contacts */}
+        <div style={{ border: '1px solid #ddd', padding: 12, height: 480, overflow: 'auto' }}>
+          <h3 style={{ marginTop: 0 }}>Contacts</h3>
+          <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+            <input
+              value={newContact}
+              onChange={(e) => setNewContact(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') addContact() }}
+              placeholder="Add by username or ID"
+              style={{ flex: 1, padding: 6 }}
+            />
+            <button onClick={addContact}>Add</button>
           </div>
-        ))}
+          {contactsError && <div style={{ color: '#d55', marginBottom: 8 }}>{contactsError}</div>}
+          <div>
+            {contacts.length === 0 && <div style={{ color: '#777' }}>No contacts yet.</div>}
+            {contacts.map((c) => (
+              <div key={c.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid #eee' }}>
+                <div>
+                  <b>{c.username}</b>
+                  <span style={{ color: '#888', marginLeft: 6 }}>[{c.status}]</span>
+                </div>
+                <button onClick={() => removeContact(c.username)} title="Remove">✕</button>
+              </div>
+            ))}
+          </div>
+
+          <h4>Incoming requests</h4>
+          <div>
+            {requests.length === 0 && <div style={{ color: '#777' }}>None</div>}
+            {requests.map((r) => (
+              <div key={r.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid #eee' }}>
+                <div>
+                  <b>{r.username}</b>
+                  <span style={{ color: '#888', marginLeft: 6 }}>[{r.status}]</span>
+                </div>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <button onClick={() => acceptRequest(r.username)}>Accept</button>
+                  <button onClick={() => removeContact(r.username)}>Decline</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Main: Chat */}
+        <div>
+          <div style={{ border: '1px solid #ddd', padding: 16, height: 360, overflow: 'auto' }}>
+            {messages.map((m, i) => (
+              <div key={i}>
+                <b>{m.senderId}:</b> {m.content} <small style={{ color: '#888' }}>{new Date(m.ts).toLocaleTimeString()}</small>
+              </div>
+            ))}
+          </div>
+          <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+            <input
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') send() }}
+              placeholder="Type a message"
+              style={{ flex: 1, padding: 8 }}
+            />
+            <button onClick={send} disabled={!connected}>Send</button>
+          </div>
+          <p style={{ color: connected ? '#2a7' : '#d55' }}>
+            {connected ? 'Connected' : 'Disconnected'} to room #{ROOM_ID} via STOMP/WebSocket.
+          </p>
+        </div>
       </div>
-      <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-        <input
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') send() }}
-          placeholder="Type a message"
-          style={{ flex: 1, padding: 8 }}
-        />
-        <button onClick={send} disabled={!connected}>Send</button>
-      </div>
-      <p style={{ color: connected ? '#2a7' : '#d55' }}>
-        {connected ? 'Connected' : 'Disconnected'} to room #{ROOM_ID} via STOMP/WebSocket.
-      </p>
     </div>
   )
 }
